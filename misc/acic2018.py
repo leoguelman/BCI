@@ -1,6 +1,8 @@
 ###------------------------- Imports
 
 import os
+os.chdir('/Users/lguelman/Library/Mobile Documents/com~apple~CloudDocs/LG_Files/Development/BCI/python')
+
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
@@ -15,7 +17,15 @@ import multiprocessing
 import stan_utility
 import arviz as az
 
-#import seaborn as sns
+from sklearn.model_selection import RandomizedSearchCV, GridSearchCV
+from sklearn.metrics import roc_auc_score
+from sklearn.model_selection import StratifiedKFold
+from xgboost import XGBClassifier
+
+
+import seaborn as sns
+
+from acic_utils import preprocess_prop_score, stan_model_summary
 #from sklearn import linear_model
 #from sklearn.linear_model import LogisticRegressionCV
 #from sklearn.ensemble import RandomForestClassifier
@@ -25,111 +35,124 @@ import arviz as az
 #import pickle 
 
 
-os.chdir('/Users/lguelman/Library/Mobile Documents/com~apple~CloudDocs/LG_Files/Development/BCI')
-
 ###------------------------- Read data 
 
-df = pd.read_csv("data/synthetic_data.csv")
+df = pd.read_csv("../data/synthetic_data.csv")
 df
 df.info()
 df.describe()
 
 ###------------------------- Assess whether randomized or observational study
-
-## Visual inspection of covariate balance
-
-fig, axes = plt.subplots(2, 5, figsize=(18, 10))
-sns.displot(df, x="X1", hue="Z", kind="ecdf", ax = axes[0, 0])
-sns.displot(df, x="X2", hue="Z", kind="ecdf", ax = axes[0, 1])
-sns.displot(df, x="X3", hue="Z", kind="ecdf", ax = axes[0, 2])
-sns.displot(df, x="X4", hue="Z", kind="ecdf", ax = axes[0, 3])
-sns.displot(df, x="X5", hue="Z", kind="ecdf", ax = axes[0, 4])
-sns.displot(df, x="S3", hue="Z", stat="probability", multiple="dodge", 
-            common_norm=False, ax = axes[1, 0])
-sns.displot(df, x="C1", hue="Z", stat="probability", multiple="dodge", 
-            common_norm=False, ax = axes[1, 1])
-sns.displot(df, x="C2", hue="Z", stat="probability", multiple="dodge", 
-            common_norm=False, ax = axes[1, 2])
-sns.displot(df, x="C3", hue="Z", stat="probability", multiple="dodge", 
-            common_norm=False, ax = axes[1, 3])
-sns.displot(df, x="XC", hue="Z", stat="probability", multiple="dodge", 
-            common_norm=False, ax = axes[1, 4])
-
-plt.show()
+#https://cran.r-project.org/web/packages/MatchIt/vignettes/assessing-balance.html#:~:text=Assessing%20balance%20involves%20assessing%20whether,joint%20distributional%20balance%20as%20well.
+#https://www.ncbi.nlm.nih.gov/pmc/articles/PMC3713509/#:~:text=The%20benefit%20of%20the%20prognostic,highly%20predictive%20of%20the%20outcome.
+#http://dm.education.wisc.edu/dkaplan2/intellcont/Chen_Kaplan_2015-1.pdf
 
 
-## Show proportion treated as a function of S3
+### Estimate treatment propensity and assess the extent of overlap 
+
+# Pre-Process data 
+
+X, z, _ = preprocess_prop_score(df)
+
+
+param_grid = {
+        'min_child_weight': [1, 5, 10],
+        'gamma': [0.5, 1, 1.5, 2, 5],
+        'subsample': [0.6, 0.8, 1.0],
+        'colsample_bytree': [0.6, 0.8, 1.0],
+        'max_depth': [3, 4, 5]
+        }
+
+n_folds = 3
+param_n_picks = 5
+
+xgb = XGBClassifier(learning_rate=0.01, n_estimators=1000, objective='binary:logistic',
+                    silent=True, nthread=1)
+
+skf = StratifiedKFold(n_splits=n_folds, shuffle = True, random_state = 42)
+
+xgb_fits = RandomizedSearchCV(xgb, param_distributions=param_grid,
+                              n_iter=param_n_picks, scoring='roc_auc', n_jobs=-1, 
+                              cv=skf.split(X,z), verbose=3, random_state=42)
+
+xgb_fits.fit(X, z)
+
+print('\n Best estimator:')
+print(xgb_fits.best_estimator_)
+print('\n Best AUC score:')
+print(xgb_fits.best_score_)
+print('\n Best hyperparameters:')
+print(xgb_fits.best_params_)
+
+# We now fit the best estimator to all train data 
+best_fit = xgb_fits.best_estimator_.fit(X, z)
+prop_score = best_fit.predict_proba(X)[:,1]
+prop_score  = np.log(prop_score /(1-prop_score))
+
+prop_score_df = pd.DataFrame({'prop_score': prop_score, 'Z':z, 'X1':df['X1'], 'X2': df['X2'],'C1': df['C1'],'S3':df['S3']})
+
+sns.displot(prop_score_df, x="prop_score", hue="Z",  stat="density", common_norm=False)
+
+sns.boxplot(x="C1", y="prop_score", data=prop_score_df)
+
 
 df.groupby(['S3']).mean()['Z'].plot.line(title="Proportion Treated")
 
-## Build frequentist ps score model and show overlap 
+# feature importance
+print(best_fit.feature_importances_)
 
-X = df.copy()
-X = X[['S3', 'C1', 'C2', 'C3', 'XC', 'X1', 'X2', 'X3', 'X4', 'X5']]
-to_categorical = ['C1'] # based on output from GAM fit in paper, these are the categorical vars (exclude S3)
-X[to_categorical] = X[to_categorical].astype('category')
-X = pd.get_dummies(X, columns= to_categorical)
-features = X.columns
-X = X.values
-print(X.shape)
-y = df['Z'].values
-#clf = LogisticRegressionCV(cv=5, random_state=0).fit(X, y)
-#clf = RandomForestClassifier().fit(X, y)
-#ps = clf.predict_proba(X)[:,1]
-model = xgboost.XGBClassifier()
-model.fit(X, y)
-ps = model.predict_proba(X)[:,1]
-#coef = pd.Series(features).to_frame()
-#coef['Coef'] = clf.coef_[0]
+#importance = pd.DataFrame({'imp':best_fit.feature_importances_ , 'names':nm.values})
+#importance.sort_values(by = ['imp'])
+#best_fit.feature_importances_ 
 
-ps_df = pd.DataFrame({'ps': ps, 'Z':y, 'X1':df['X1'], 'X2': df['X2'],'C1': df['C1'],'S3':df['S3']})
-#X1_bin = np.quantile(df['X1'], q = np.arange(0, 1, 0.1))
-#ps_df['X1_bin'] = pd.cut(ps_df['X1'], bins=X1_bin)
-#X2_bin = np.quantile(df['X2'], q = np.arange(0, 1, 0.1))
-#ps_df['X2_bin'] = pd.cut(ps_df['X2'], bins=X2_bin, include_lowest=True)
-
-#ps_df['X1_bins'].value_counts()
-
-sns.displot(ps_df, x="ps", hue="Z",  stat="density", common_norm=False)
-
-#sns.boxplot(x="X1_bin", y="ps", data=ps_df)
-#sns.boxplot(x="X2_bin", y="ps", data=ps_df)
-#sns.boxplot(x="C1", y="ps", data=ps_df)
+# plot
+from matplotlib import pyplot
+pyplot.bar(range(len(best_fit.feature_importances_)), best_fit.feature_importances_)
+pyplot.show()
 
 
-###------------------------- Stability Selection
+### Bayesian Prognostic scores
 
-### Prep data 
+X, z, y = preprocess_prop_score(df)
 
-X = df.copy()
-features = ['S3', 'C1', 'C2', 'C3', 'XC', 'X1', 'X2', 'X3', 'X4', 'X5']
-X = X[['Z'] + features]
-to_categorical = ['C1', 'XC'] # I believe these are the features deemed as categorical in Athey's paper
-X[to_categorical] = X[to_categorical].astype('category')
-X = pd.get_dummies(X, columns= to_categorical, drop_first=False) #k-1 encoding
-main_cols = X.columns.drop('Z').values.tolist()
-inter_cols = ["Z_" + i for i in main_cols]
-X[inter_cols] = X[main_cols].multiply(X["Z"], axis="index")
-#X['ps'] = ps
-colnames = X.columns.values
-X = X.values
-y = df['Y']
+n, p = X[z==1,:].shape
+
+stan_data_dict = {'N': n,
+                  'K': p,
+                  'x': X[z==1,:],
+                  'y': y[z==1],
+                  'N_new': X.shape[0],
+                  'x_new': X
+                  }
+
+sm = pystan.StanModel('../stan/stan_linear_reg.stan') 
+multiprocessing.set_start_method("fork", force=True)
+fit = sm.sampling(data=stan_data_dict, iter=1000, chains=4)
+
+summary_df = stan_model_summary(fit)
+summary_df 
+
+samples = fit.extract(permuted=True)
+
+prog_scores = samples['prog_scores'].T
 
 
-selector = StabilitySelection(base_estimator=linear_model.Lasso(random_state=0),lambda_name='alpha',
-                              lambda_grid=np.logspace(-5, -1, 50)).fit(X, y)
 
-stab_scores = np.mean(selector.stability_scores_, axis = 1)
-stab_scores_df = pd.DataFrame({'colnames':colnames, 'stab_scores':stab_scores})
+# Compute distribution of standardize mean difference in prognostic scores
+
+
 
 
 
 ###------------------------- Prep and save data for stan
 
-df = pd.read_csv("synthetic_data.csv")
+df = pd.read_csv("../data/synthetic_data.csv")
 df
 df.info()
 df.describe()
+
+#for i in range(df.shape[1]):
+#    print(df.columns[i], len(np.unique(df.iloc[:,i].values)))
 
 ### Prep data 
 
