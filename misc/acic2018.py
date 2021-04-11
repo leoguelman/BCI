@@ -110,7 +110,6 @@ from matplotlib import pyplot
 pyplot.bar(range(len(best_fit.feature_importances_)), best_fit.feature_importances_)
 pyplot.show()
 
-
 ### Bayesian Prognostic scores
 
 X, z, y = preprocess_prop_score(df)
@@ -135,6 +134,27 @@ summary_df
 samples = fit.extract(permuted=True)
 
 prog_scores = samples['prog_scores'].T
+
+mcmc_samples = prog_scores.shape[1]
+prog_scores_std_diff = np.zeros(mcmc_samples)
+prog_scores_diff = np.zeros(mcmc_samples)
+
+for s in range(mcmc_samples):
+    prog_scores_diff[s] = np.mean(prog_scores[z==1,s]) - np.mean(prog_scores[z==0,s])
+    prog_scores_std_diff[s] = prog_scores_diff[s] / np.std(prog_scores[:,s])
+  
+                               
+# Note: Students with highest potential outcomes under control are more likely to get treatment 
+plt.hist(prog_scores_std_diff, bins = 30)
+plt.title("Standardized mean difference in Prognostic scores", fontsize=12)
+plt.show()    
+
+plt.hist(prog_scores_diff, bins = 30)
+plt.title("Mean difference in Prognostic scores", fontsize=12)
+plt.show()                              
+
+    
+
 
 
 

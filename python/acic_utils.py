@@ -1,7 +1,7 @@
 import pandas as pd
 from sklearn.preprocessing import StandardScaler
 
-def preprocess_prop_score(df, standardize_x = True):
+def preprocess_p_scores(df, standardize_x = True):
     X = df.copy()
     features_names = X.columns.values[3:]
     X = X[features_names]
