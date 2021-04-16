@@ -38,6 +38,9 @@ def pre_process_data(df, standardize_x = True, interactions=False, p_score=None,
     X[to_categorical] = X[to_categorical].astype('category')
     X = pd.get_dummies(X, columns= to_categorical, drop_first=drop_first)
     
+    if p_score is not None:
+        X['p_score'] = p_score
+    
     if interactions:
         X['Z'] = df['Z']
         m_effects = X.columns.drop('Z').values.tolist()
@@ -48,12 +51,7 @@ def pre_process_data(df, standardize_x = True, interactions=False, p_score=None,
     else:
         m_effects = None
         i_effects = None
-        
-    if p_score is not None:
-        X['p_score'] = p_score
-        m_effects = m_effects + ['p_score']
-        
-    
+         
     a_effects = X.columns.tolist()
     X = X.values
     

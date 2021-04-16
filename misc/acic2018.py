@@ -420,3 +420,106 @@ profile_by_decile['X5'].plot()
 
 
 
+
+###------------------------- Test
+
+
+import os
+os.chdir('/Users/lguelman/Library/Mobile Documents/com~apple~CloudDocs/LG_Files/Development/BCI/python')
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+parameters = {'figure.figsize': (8, 4),
+              'font.size': 8, 
+              'axes.labelsize': 12}
+plt.rcParams.update(parameters)
+plt.style.use('fivethirtyeight')
+
+import pystan
+import multiprocessing
+import stan_utility
+import arviz as az
+
+from sklearn.model_selection import RandomizedSearchCV, GridSearchCV
+from sklearn.metrics import roc_auc_score
+from sklearn.model_selection import StratifiedKFold
+from xgboost import XGBClassifier
+
+
+import seaborn as sns
+
+from acic_utils import pre_process_data, stan_model_summary
+
+
+df = pd.read_csv("../data/synthetic_data.csv")
+df
+df.info()
+df.describe()
+
+X, z, y, *_ = pre_process_data(df, standardize_x=True, interactions=False, 
+                               p_score=None, drop_first=False)
+
+
+param_grid = {
+        'min_child_weight': [1, 5, 10],
+        'gamma': [0.5, 1, 1.5, 2, 5],
+        'subsample': [0.6, 0.8, 1.0],
+        'colsample_bytree': [0.6, 0.8, 1.0],
+        'max_depth': [3, 4, 5]
+        }
+
+n_folds = 3
+param_n_picks = 3
+
+xgb = XGBClassifier(learning_rate=0.01, n_estimators=500, objective='binary:logistic',
+                    silent=True, nthread=1)
+
+skf = StratifiedKFold(n_splits=n_folds, shuffle = True, random_state = 42)
+
+xgb_fits = RandomizedSearchCV(xgb, param_distributions=param_grid,
+                              n_iter=param_n_picks, scoring='roc_auc', n_jobs=-1, 
+                              cv=skf.split(X,z), verbose=3, random_state=42)
+
+xgb_fits.fit(X, z)
+
+print('\n Best estimator:')
+print(xgb_fits.best_estimator_)
+print('\n Best AUC score:')
+print(xgb_fits.best_score_)
+print('\n Best hyperparameters:')
+print(xgb_fits.best_params_)
+
+# We now fit the best estimator to all train data 
+best_fit = xgb_fits.best_estimator_.fit(X, z)
+pscore = best_fit.predict_proba(X)[:,1]
+log_odds_pscore = np.log(pscore /(1-pscore))
+
+
+
+X, z, y, a_effects, m_effects, i_effects = pre_process_data(df, standardize_x=True, interactions=True, 
+                                                            p_score=log_odds_pscore, drop_first=False)
+
+# Get indexes of main and interaction effects
+idx_m_effects = [a_effects.index(i) for i in m_effects]
+idx_i_effects = [a_effects.index(i) for i in i_effects]
+
+print(X.shape)
+print(len(idx_m_effects))
+print(len(idx_i_effects))
+print(X[:,idx_m_effects].shape)
+print(X[:,idx_i_effects].shape)
+
+
+stan_data_mbi = {'N': X.shape[0], 
+                 'N_main_cov':len(idx_m_effects),
+                 'N_inter_cov':len(idx_i_effects),
+                 'y': y,
+                 'z': z,
+                 'x': X[:,idx_m_effects],
+                 'xz_inter': X[:,idx_i_effects],
+                 'rho':0.0}
+
+sm = pystan.StanModel('../stan/stan_mbi.stan') 
+multiprocessing.set_start_method("fork", force=True)
+fit_mbi = sm.sampling(data=stan_data_mbi, iter=100, chains=4)
